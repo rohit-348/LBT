@@ -315,7 +315,6 @@ with st.sidebar:
 uploaded_file = st.file_uploader("📥 Upload Input Excel File (.xlsx)", type=["xlsx", "xls"])
 
 if uploaded_file is not None:
-    # Track file identity so we only reset the editor when a NEW file is uploaded
     file_id = f"{uploaded_file.name}_{uploaded_file.size}"
     if st.session_state.get("current_file_id") != file_id:
         try:
@@ -325,7 +324,6 @@ if uploaded_file is not None:
             st.session_state["C_raw"] = C_raw
             st.session_state["L_original"] = L_raw.copy()
             st.session_state["L_working"] = L_raw.copy()
-            # Clear previous results when a brand-new file is loaded
             st.session_state.pop("final_df", None)
         except Exception as e:
             st.error(f"❌ Could not read sheets from Excel file: {e}")
@@ -345,6 +343,9 @@ if "L_working" in st.session_state:
     L_current = st.session_state["L_working"].copy()
     available_tags = [c for c in st.session_state["C_raw"].columns if c != "Timestamp"]
 
+    selected_perf = None
+    selected_dir = None
+
     if "performance_tag" in L_current.columns and "direction" in L_current.columns:
         valid_perf = L_current[["performance_tag", "direction"]].dropna()
         default_perf = str(valid_perf.iloc[0]["performance_tag"]).strip() if not valid_perf.empty else (available_tags[0] if available_tags else "")
@@ -361,12 +362,12 @@ if "L_working" in st.session_state:
             dir_idx = dir_options.index(default_dir) if default_dir in dir_options else 0
             selected_dir = st.selectbox("🧭 Optimization Direction", options=dir_options, index=dir_idx)
 
-        # Sync quick-selector changes back into the working dataframe
-        L_current["performance_tag"] = np.nan
-        L_current["direction"] = np.nan
+        # Explicitly cast to object dtype before assigning strings (prevents pandas LossySetitemError)
+        L_current["performance_tag"] = pd.Series([None] * len(L_current), index=L_current.index, dtype="object")
+        L_current["direction"] = pd.Series([None] * len(L_current), index=L_current.index, dtype="object")
         if len(L_current) > 0:
-            L_current.loc[L_current.index[0], "performance_tag"] = selected_perf
-            L_current.loc[L_current.index[0], "direction"] = selected_dir
+            L_current.loc[L_current.index[0], "performance_tag"] = str(selected_perf)
+            L_current.loc[L_current.index[0], "direction"] = str(selected_dir)
 
     # Interactive Editable Table
     edited_L = st.data_editor(
@@ -384,12 +385,12 @@ if "L_working" in st.session_state:
                 C = st.session_state["C_raw"].copy()
                 L_active = edited_L.copy()
 
-                # Ensure performance_tag & direction persist even if user added rows
+                # Ensure performance_tag & direction persist with object dtype
                 if "performance_tag" in L_active.columns and "direction" in L_active.columns and len(L_active) > 0:
-                    L_active["performance_tag"] = np.nan
-                    L_active["direction"] = np.nan
-                    L_active.loc[L_active.index[0], "performance_tag"] = selected_perf
-                    L_active.loc[L_active.index[0], "direction"] = selected_dir
+                    L_active["performance_tag"] = pd.Series([None] * len(L_active), index=L_active.index, dtype="object")
+                    L_active["direction"] = pd.Series([None] * len(L_active), index=L_active.index, dtype="object")
+                    L_active.loc[L_active.index[0], "performance_tag"] = str(selected_perf)
+                    L_active.loc[L_active.index[0], "direction"] = str(selected_dir)
 
                 # Build decimal dictionary from edited table
                 valid_dec = L_active[["Match_tags", "Match_Tag_Decimal"]].dropna()
