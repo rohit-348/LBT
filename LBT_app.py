@@ -1,5 +1,4 @@
 import io
-import os
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -22,16 +21,14 @@ st.set_page_config(
 # CORE LBT PROCESSING FUNCTIONS
 # ==============================
 
-def load_data(uploaded_file, sheet_t, sheet_c, sheet_l):
+def load_sheets(uploaded_file, sheet_t, sheet_c, sheet_l):
     T = pd.read_excel(uploaded_file, sheet_name=sheet_t)
     C = pd.read_excel(uploaded_file, sheet_name=sheet_c)
     L = pd.read_excel(uploaded_file, sheet_name=sheet_l)
 
     T["Timestamp"] = pd.to_datetime(T["Timestamp"], errors="coerce")
     C["Timestamp"] = pd.to_datetime(C["Timestamp"], errors="coerce")
-
-    decimal_dict = L.set_index("Match_tags")["Match_Tag_Decimal"].dropna().to_dict()
-    return T, C, L, decimal_dict
+    return T, C, L
 
 
 def add_feed_stability(df, feed_col, min_val, max_val):
@@ -81,7 +78,7 @@ def build_result(row_t, matched_row, T, C, L, match_tags, decimal_dict):
                 it_no = tol_row["Iteration No"]
                 min_tol = tol_row["Tolerance_minimum"]
                 max_tol = tol_row["Tolerance_maximum"]
-                if -min_tol <= delta <= max_tol:
+                if pd.notnull(min_tol) and pd.notnull(max_tol) and (-min_tol <= delta <= max_tol):
                     found_iter = it_no
                     break
             result[iter_col] = found_iter
@@ -120,18 +117,28 @@ def build_no_match_result(row_t, T, C, match_tags, decimal_dict):
 def match_records(T, C, L, max_benchmarks, decimal_dict):
     results = []
     match_tags = L["Match_tags"].dropna().unique().tolist()
-    max_iterations = int(pd.to_numeric(L["Iteration No"], errors="coerce").dropna().max())
+    iter_series = pd.to_numeric(L["Iteration No"], errors="coerce").dropna()
+    if iter_series.empty:
+        raise ValueError("No valid 'Iteration No' values found in lbt_input configuration.")
+    max_iterations = int(iter_series.max())
 
     for _, row_t in T.iterrows():
         match_found = False
         for iteration in range(1, max_iterations + 1):
-            current_tol = L[L["Iteration No"] == iteration]
+            current_tol = L[pd.to_numeric(L["Iteration No"], errors="coerce") == iteration]
             filtered_C = C.copy()
             for _, tol_row in current_tol.iterrows():
                 col = tol_row["Match_tags"]
                 min_tol = tol_row["Tolerance_minimum"]
                 max_tol = tol_row["Tolerance_maximum"]
-                if col not in T.columns or col not in C.columns or col == "Timestamp":
+                if (
+                    pd.isnull(col)
+                    or col not in T.columns
+                    or col not in C.columns
+                    or col == "Timestamp"
+                    or pd.isnull(min_tol)
+                    or pd.isnull(max_tol)
+                ):
                     continue
                 val_t = row_t[col]
                 if pd.isnull(val_t):
@@ -154,13 +161,17 @@ def match_records(T, C, L, max_benchmarks, decimal_dict):
 
 
 def filter_optimal_rows(df, L):
+    if "performance_tag" not in L.columns or "direction" not in L.columns:
+        st.warning("⚠️ 'performance_tag' or 'direction' column missing in config - skipping optimal filtering.")
+        return df
+
     perf_config = L[["performance_tag", "direction"]].dropna().drop_duplicates()
     if perf_config.empty:
         st.warning("⚠️ No performance tag found in config - skipping filtering.")
         return df
 
-    perf_tag = perf_config.iloc[0]["performance_tag"]
-    direction = perf_config.iloc[0]["direction"].strip().lower()
+    perf_tag = str(perf_config.iloc[0]["performance_tag"]).strip()
+    direction = str(perf_config.iloc[0]["direction"]).strip().lower()
     perf_col = f"{perf_tag}_benchmark"
     if perf_col not in df.columns:
         st.warning(f"⚠️ Performance column '{perf_col}' not found - skipping filtering.")
@@ -175,7 +186,7 @@ def filter_optimal_rows(df, L):
     elif direction == "maximize":
         optimal_df = matched_df.loc[matched_df.groupby("Timestamp_Actual")[perf_col].idxmax()]
     else:
-        raise ValueError(f"Unknown direction '{direction}' in performance config.")
+        raise ValueError(f"Unknown direction '{direction}' in performance config. Must be 'minimize' or 'maximize'.")
 
     unmatched_latest = unmatched_df.sort_values("Timestamp_Actual").drop_duplicates(
         subset=["Timestamp_Actual"], keep="last"
@@ -216,7 +227,7 @@ def process_results(results, T, C, L):
     return filter_optimal_rows(df, L)
 
 
-def generate_plot_and_excel_bytes(df, plot_sheet_name="LinePlot"):
+def generate_plot_and_excel_bytes(df, used_L_df, plot_sheet_name="LinePlot"):
     plot_df = df.copy()
     plot_df["Timestamp_Actual"] = pd.to_datetime(plot_df["Timestamp_Actual"], errors="coerce")
     iter_cols = [col for col in plot_df.columns if col.startswith("matched_iteration_")]
@@ -249,10 +260,11 @@ def generate_plot_and_excel_bytes(df, plot_sheet_name="LinePlot"):
         fig.savefig(plot_buf, format="png", dpi=150)
         plot_buf.seek(0)
 
-    # Write DataFrame to in-memory Excel file
+    # Write Results + Used LBT Config to in-memory Excel file
     excel_buf = io.BytesIO()
     with pd.ExcelWriter(excel_buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Sheet1")
+        df.to_excel(writer, index=False, sheet_name="Results")
+        used_L_df.to_excel(writer, index=False, sheet_name="lbt_input_used")
 
     # Embed image into Excel if plot was created
     if plot_buf is not None:
@@ -277,11 +289,11 @@ def generate_plot_and_excel_bytes(df, plot_sheet_name="LinePlot"):
 # ==============================
 
 st.title("⚡ Look-Back Benchmarking (LBT) Studio")
-st.markdown("Upload your process data workbook to filter stable operating periods, match historical tolerances, and export optimal benchmarks.")
+st.markdown("Upload your process data workbook, tweak tolerances or KPI parameters live in the table below, and run instant benchmarking.")
 
 # --- Sidebar Configuration ---
 with st.sidebar:
-    st.header("⚙️ Configuration")
+    st.header("⚙️ Global Settings")
 
     st.subheader("1. Stability Filter")
     feed_tag = st.text_input("Feed Column Tag", value="feed_MMSCFD")
@@ -303,27 +315,101 @@ with st.sidebar:
 uploaded_file = st.file_uploader("📥 Upload Input Excel File (.xlsx)", type=["xlsx", "xls"])
 
 if uploaded_file is not None:
+    # Track file identity so we only reset the editor when a NEW file is uploaded
+    file_id = f"{uploaded_file.name}_{uploaded_file.size}"
+    if st.session_state.get("current_file_id") != file_id:
+        try:
+            T_raw, C_raw, L_raw = load_sheets(uploaded_file, sheet_t, sheet_c, sheet_l)
+            st.session_state["current_file_id"] = file_id
+            st.session_state["T_raw"] = T_raw
+            st.session_state["C_raw"] = C_raw
+            st.session_state["L_original"] = L_raw.copy()
+            st.session_state["L_working"] = L_raw.copy()
+            # Clear previous results when a brand-new file is loaded
+            st.session_state.pop("final_df", None)
+        except Exception as e:
+            st.error(f"❌ Could not read sheets from Excel file: {e}")
+
+if "L_working" in st.session_state:
+    st.divider()
+    header_col1, header_col2 = st.columns([4, 1])
+    with header_col1:
+        st.subheader("🛠️ Live LBT Configuration Editor (`lbt_input`)")
+        st.caption("Edit tolerances, add/delete iteration rows (`+` at bottom), or change the performance tag & direction below.")
+    with header_col2:
+        if st.button("↺ Reset to Original Excel", use_container_width=True):
+            st.session_state["L_working"] = st.session_state["L_original"].copy()
+            st.rerun()
+
+    # Quick Performance Tag & Direction override bar
+    L_current = st.session_state["L_working"].copy()
+    available_tags = [c for c in st.session_state["C_raw"].columns if c != "Timestamp"]
+
+    if "performance_tag" in L_current.columns and "direction" in L_current.columns:
+        valid_perf = L_current[["performance_tag", "direction"]].dropna()
+        default_perf = str(valid_perf.iloc[0]["performance_tag"]).strip() if not valid_perf.empty else (available_tags[0] if available_tags else "")
+        default_dir = str(valid_perf.iloc[0]["direction"]).strip().lower() if not valid_perf.empty else "minimize"
+
+        p_col1, p_col2 = st.columns(2)
+        with p_col1:
+            if default_perf in available_tags:
+                selected_perf = st.selectbox("🎯 Target Performance Tag (KPI)", options=available_tags, index=available_tags.index(default_perf))
+            else:
+                selected_perf = st.text_input("🎯 Target Performance Tag (KPI)", value=default_perf)
+        with p_col2:
+            dir_options = ["minimize", "maximize"]
+            dir_idx = dir_options.index(default_dir) if default_dir in dir_options else 0
+            selected_dir = st.selectbox("🧭 Optimization Direction", options=dir_options, index=dir_idx)
+
+        # Sync quick-selector changes back into the working dataframe
+        L_current["performance_tag"] = np.nan
+        L_current["direction"] = np.nan
+        if len(L_current) > 0:
+            L_current.loc[L_current.index[0], "performance_tag"] = selected_perf
+            L_current.loc[L_current.index[0], "direction"] = selected_dir
+
+    # Interactive Editable Table
+    edited_L = st.data_editor(
+        L_current,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="lbt_editor",
+    )
+
+    # Run Button
     if st.button("▶ Run Benchmarking Analysis", type="primary", use_container_width=True):
-        with st.spinner("Processing data and evaluating tolerance iterations..."):
+        with st.spinner("Running analysis with your live configuration..."):
             try:
-                # 1. Load Data
-                T, C, L, decimal_dict = load_data(uploaded_file, sheet_t, sheet_c, sheet_l)
+                T = st.session_state["T_raw"].copy()
+                C = st.session_state["C_raw"].copy()
+                L_active = edited_L.copy()
+
+                # Ensure performance_tag & direction persist even if user added rows
+                if "performance_tag" in L_active.columns and "direction" in L_active.columns and len(L_active) > 0:
+                    L_active["performance_tag"] = np.nan
+                    L_active["direction"] = np.nan
+                    L_active.loc[L_active.index[0], "performance_tag"] = selected_perf
+                    L_active.loc[L_active.index[0], "direction"] = selected_dir
+
+                # Build decimal dictionary from edited table
+                valid_dec = L_active[["Match_tags", "Match_Tag_Decimal"]].dropna()
+                decimal_dict = valid_dec.set_index("Match_tags")["Match_Tag_Decimal"].to_dict()
+
                 total_clean_rows = len(C)
 
-                # 2. Stability Filter
+                # 1. Stability Filter
                 C = add_feed_stability(C, feed_col=feed_tag.strip(), min_val=feed_min, max_val=feed_max)
                 if "Feed_Stable" in C.columns:
                     C = C[C["Feed_Stable"] == "Stable"].copy()
                 stable_clean_rows = len(C)
 
-                # 3. Match & Optimize
-                results = match_records(T, C, L, int(max_benchmarks), decimal_dict)
-                final_df = process_results(results, T, C, L)
+                # 2. Match & Optimize
+                results = match_records(T, C, L_active, int(max_benchmarks), decimal_dict)
+                final_df = process_results(results, T, C, L_active)
 
-                # 4. Generate Plot & Output Excel in Memory
-                excel_bytes, fig = generate_plot_and_excel_bytes(final_df)
+                # 3. Generate Plot & Output Excel in Memory
+                excel_bytes, fig = generate_plot_and_excel_bytes(final_df, L_active)
 
-                # Save outputs in session_state so they persist across interactions
                 st.session_state["final_df"] = final_df
                 st.session_state["excel_bytes"] = excel_bytes
                 st.session_state["fig"] = fig
@@ -334,7 +420,7 @@ if uploaded_file is not None:
                     "matched_rows": int((final_df["iteration_matched"] != "BENCHMARK NOT FOUND").sum())
                     if "iteration_matched" in final_df.columns else 0,
                 }
-                st.success("✅ Benchmarking analysis completed successfully!")
+                st.success("✅ Benchmarking analysis completed with your live settings!")
 
             except Exception as e:
                 st.error(f"❌ Error during execution: {e}")
@@ -355,7 +441,7 @@ if "final_df" in st.session_state:
 
     # Download Button
     st.download_button(
-        label="⬇️ Download Output Excel Report (.xlsx with LinePlot)",
+        label="⬇️ Download Output Excel Report (.xlsx with Results, Config & LinePlot)",
         data=st.session_state["excel_bytes"],
         file_name="Cryo_2_LBT_Result.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
