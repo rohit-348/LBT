@@ -335,11 +335,14 @@ def generate_plot_and_excel_bytes(df, used_L_df, plot_sheet_name="LinePlot"):
         fig.savefig(plot_buf, format="png", dpi=150)
         plot_buf.seek(0)
 
+    # Sheet 1: Edited LBT Input Configuration
+    # Sheet 2: Benchmark Results Data
     excel_buf = io.BytesIO()
     with pd.ExcelWriter(excel_buf, engine="openpyxl") as writer:
+        used_L_df.to_excel(writer, index=False, sheet_name="lbt_input")
         df.to_excel(writer, index=False, sheet_name="Results")
-        used_L_df.to_excel(writer, index=False, sheet_name="lbt_input_used")
 
+    # Sheet 3: Embedded Line Plot
     if plot_buf is not None:
         excel_buf.seek(0)
         wb = load_workbook(excel_buf)
@@ -364,7 +367,7 @@ def generate_plot_and_excel_bytes(df, used_L_df, plot_sheet_name="LinePlot"):
 st.title("⚡ Look-Back Benchmarking (LBT) Studio")
 st.markdown("Upload your Excel workbook to inspect and customize stability limits, KPI targets, and iteration tolerances.")
 
-# --- Step 1: Sheet Names & File Uploader (Shown First) ---
+# --- Step 1: Sheet Names & File Uploader ---
 with st.expander("📄 Sheet Name Mapping (Optional — edit only if your workbook uses custom tab names)", expanded=False):
     s_col1, s_col2, s_col3 = st.columns(3)
     with s_col1:
@@ -447,7 +450,6 @@ if "cfg" in st.session_state:
                 index=dir_opts.index(cfg["direction"]),
             )
 
-        # Multi-select to add/remove Match Tags cleanly
         selected_tags = st.multiselect(
             "Active Match Tags (Tags compared across iterations)",
             options=available_tags,
@@ -474,7 +476,6 @@ if "cfg" in st.session_state:
                 cfg["iterations"][new_it] = {}
                 for t in cfg["tags"]:
                     if prev_it is not None and t in cfg["iterations"][prev_it]:
-                        # Pre-fill slightly wider tolerances than previous iteration
                         cfg["iterations"][new_it][t] = {
                             "min": round(cfg["iterations"][prev_it][t]["min"] * 1.5, 4),
                             "max": round(cfg["iterations"][prev_it][t]["max"] * 1.5, 4),
@@ -497,7 +498,6 @@ if "cfg" in st.session_state:
 
             for idx, it in enumerate(sorted_iters):
                 with iter_tabs[idx]:
-                    # Header Row
                     h_tag, h_dec, h_min, h_max = st.columns([3, 1, 1.5, 1.5])
                     h_tag.markdown("**Process Tag**")
                     h_dec.markdown("**Decimals**")
@@ -557,10 +557,11 @@ if "cfg" in st.session_state:
                     results = match_records(T, C, L_active, int(max_benchmarks), decimal_dict)
                     final_df = process_results(results, T, C, L_active)
 
-                    # 3. Generate Plot & Output Excel
+                    # 3. Generate Plot & Output Excel (Sheet 1: lbt_input, Sheet 2: Results, Sheet 3: LinePlot)
                     excel_bytes, fig = generate_plot_and_excel_bytes(final_df, L_active)
 
                     st.session_state["final_df"] = final_df
+                    st.session_state["used_L_df"] = L_active
                     st.session_state["excel_bytes"] = excel_bytes
                     st.session_state["fig"] = fig
                     st.session_state["metrics"] = {
@@ -590,14 +591,18 @@ if "final_df" in st.session_state:
     m4.metric("Match Success Rate", f"{match_rate}%")
 
     st.download_button(
-        label="⬇️ Download Output Excel Report (.xlsx with Results, Config & LinePlot)",
+        label="⬇️ Download Output Excel Report (.xlsx — Sheet 1: lbt_input | Sheet 2: Results | Sheet 3: LinePlot)",
         data=st.session_state["excel_bytes"],
         file_name="Cryo_2_LBT_Result.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         type="primary",
     )
 
-    tab_table, tab_plot = st.tabs(["📋 Optimal Benchmark Table", "📈 Match Tag Iterations Plot"])
+    tab_table, tab_plot, tab_cfg = st.tabs([
+        "📋 Optimal Benchmark Table (Results)",
+        "📈 Match Tag Iterations Plot (LinePlot)",
+        "⚙️ Applied Config Snapshot (lbt_input)",
+    ])
 
     with tab_table:
         st.dataframe(final_df, use_container_width=True, height=450)
@@ -607,3 +612,6 @@ if "final_df" in st.session_state:
             st.pyplot(st.session_state["fig"])
         else:
             st.info("No iteration columns found to generate the line plot.")
+
+    with tab_cfg:
+        st.dataframe(st.session_state["used_L_df"], use_container_width=True)
